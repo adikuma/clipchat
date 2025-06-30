@@ -34,7 +34,17 @@ class VideoProcessor:
     
     def sanitize_filename(self, name: str) -> str:
         """clean filename for safe storage"""
-        return re.sub(r'[\\/*?:"<>|]', "", name)
+        # remove invalid characters
+        cleaned = re.sub(r'[\\/*?:"<>|]', "", name)
+        # remove trailing dots and spaces (windows doesn't allow these)
+        cleaned = cleaned.rstrip('. ')
+        # limit length
+        if len(cleaned) > 200:
+            cleaned = cleaned[:200]
+        # ensure not empty
+        if not cleaned:
+            cleaned = "video"
+        return cleaned
     
     def download_video(self, url: str) -> str:
         """
@@ -92,7 +102,7 @@ class VideoProcessor:
         # extract audio
         console.print("[yellow]extracting audio...[/yellow]")
         clip = VideoFileClip(video_path)
-        clip.audio.write_audiofile(str(audio_path), logger=None, verbose=False)
+        clip.audio.write_audiofile(str(audio_path), logger=None)
         clip.close()
         
         # whisper transcription
@@ -136,7 +146,7 @@ class VideoProcessor:
         returns:
             list of metadata dictionaries
         """
-        video_name = Path(video_path).stem
+        video_name = self.sanitize_filename(Path(video_path).stem)
         frames_subdir = self.frames_dir / video_name
         metadata_file = self.metadata_dir / f"{video_name}_metadata.json"
         
@@ -147,7 +157,12 @@ class VideoProcessor:
                 return json.load(f)
         
         # create frame directory
-        frames_subdir.mkdir(exist_ok=True)
+        try:
+            frames_subdir.mkdir(exist_ok=True, parents=True)
+            console.print(f"[blue]saving frames to: {frames_subdir}[/blue]")
+        except Exception as e:
+            console.print(f"[red]error creating frame directory {frames_subdir}: {e}[/red]")
+            raise
         
         console.print("[blue]extracting frames and metadata...[/blue]")
         
@@ -181,7 +196,12 @@ class VideoProcessor:
                 # save frame
                 img_fname = f"frame_{idx:04d}.jpg"
                 img_fpath = frames_subdir / img_fname
-                cv2.imwrite(str(img_fpath), frame_resized)
+                success_write = cv2.imwrite(str(img_fpath), frame_resized)
+                
+                if not success_write:
+                    console.print(f"[red]failed to save frame {img_fpath}[/red]")
+                    progress.advance(task)
+                    continue
                 
                 # create metadata
                 text = cap.text.replace("\n", " ").strip()
@@ -249,9 +269,18 @@ class VideoProcessor:
             middle_idx = start_idx + (end_idx - start_idx) // 2
             representative_segment = metadatas[middle_idx]
             
+            # verify frame file exists, use first available frame if not
+            frame_path = representative_segment['extracted_frame_path']
+            if not Path(frame_path).exists():
+                # find first existing frame in the chunk
+                for seg in chunk_segments:
+                    if Path(seg['extracted_frame_path']).exists():
+                        frame_path = seg['extracted_frame_path']
+                        break
+            
             # create chunked metadata
             chunked_metadata = {
-                'extracted_frame_path': representative_segment['extracted_frame_path'],
+                'extracted_frame_path': frame_path,
                 'transcript': combined_transcript,
                 'video_segment_id': f"chunk_{i:04d}",
                 'video_path': representative_segment['video_path'],
